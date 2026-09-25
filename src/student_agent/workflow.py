@@ -129,6 +129,19 @@ class Orchestrator:
                     ],
                 },
                 "rules": (
+                    "Return exactly two top-level keys: output and calculations. "
+                    "Place the official case object INSIDE output, never at the top level. "
+                    "A tool_execution_failed event is a technical retrieval failure, NOT "
+                    "a business refund_failed or payment_failed event. Do not infer "
+                    "business failure or payment-provider responsibility from tool failure. "
+                    "Evidence refs (ev_...) are NOT entity IDs: never put them in payment "
+                    "references, shipment IDs or other affected entity lists. Unknown IDs "
+                    "stay empty. Use actual IDs explicitly present in the source data. "
+                    "Resolve conflicting timelines before counting duplicate items/payments; "
+                    "do not sum different versions of the same record. Report source "
+                    "conflicts explicitly, preserving unresolved conflicts when necessary. "
+                    "Use exact recommended_action codes from policy, not free-text sentences. "
+                    "Cite policy evidence whenever policy informs the decision. "
                     "Use MCP policy data for precedence and source conflicts. Do not treat claim "
                     "topics as answers. Include every input claim_id in claim_assessments. "
                     "Use only relevant received refs. Preserve entity_resolution exactly. "
