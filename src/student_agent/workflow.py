@@ -278,26 +278,53 @@ class Orchestrator:
         if customer_id:
             # Failure stays explicit in the payload, never becomes empty history.
             with suppress(MCPToolError):
-                await book.fetch("entity-agent", "get_customer_history",
-                                 customer_unique_id=customer_id)
-        resolution = await self.model.complete(
-            "resolve_entity",
-            {
-                "case": case,
-                "candidates": orders,
-                "unreadable_candidates": unreadable,
-                "tool_failures": book.failures,
-                "evidence": book.ledger,
-                "required_response": self.schemas["l3b-output-v2.schema.json"]["properties"][
-                    "entity_resolution"
-                ],
-                "rules": "Resolve only from received evidence; not from the alleged order alone. "
-                "Return status, resolved_order_ids, rejected_candidates, confidence. "
-                "Use ambiguous or not_found when justified; never invent an ID. "
-                "Unreadable candidates are unknown, not disproved. Do not select or reject "
-                "them based on failed calls. Missing customer history is unknown, not empty.",
-            },
-        )
+                await book.fetch(
+                    "entity-agent", "get_customer_history", customer_unique_id=customer_id
+                )
+        payload = {
+            "case": case,
+            "candidates": orders,
+            "unreadable_candidates": unreadable,
+            "allowed_ids_in_either_result_list": sorted(orders),
+            "tool_failures": book.failures,
+            "evidence": book.ledger,
+            "required_response": self.schemas["l3b-output-v2.schema.json"]["properties"][
+                "entity_resolution"
+            ],
+            "rules": "Resolve only from received evidence; not from the alleged order alone. "
+            "Return status, resolved_order_ids, rejected_candidates, confidence. "
+            "Use ambiguous or not_found when justified; never invent an ID. "
+            "Unreadable candidates are unknown, not disproved. Do not select or reject "
+            "them based on failed calls. Missing customer history is unknown, not empty. "
+            "The rejected_candidates list can be empty; do not force every input "
+            "candidate into a result list. Omit every unreadable candidate from both lists.",
+        }
+        witnessed = set().union(*(values_for_key(e["data"], "order_id") for e in orders.values()))
+        for attempt in range(self.repair_attempts + 1):
+            resolution = await self.model.complete("resolve_entity", payload)
+            try:
+                self._check_resolution(resolution, set(candidates), set(unreadable), witnessed)
+                break
+            except (ValueError, TypeError, KeyError) as error:
+                book.trace.emit(
+                    case_id=book.case_id,
+                    event_type="handoff",
+                    actor="verifier",
+                    target="entity-agent",
+                    decision_code="ENTITY_RESOLUTION_REJECTED",
+                    attributes={"attempt": attempt + 1, "error_type": type(error).__name__},
+                )
+                if attempt == self.repair_attempts:
+                    raise
+                payload["validation_feedback"] = str(error)[:800]
+                payload["previous_response"] = resolution
+        book.handoff("entity-agent", "coordinator", list(book.ledger), "ENTITY_RESOLVED")
+        return resolution, set(candidates)
+
+    @staticmethod
+    def _check_resolution(
+        resolution: dict, candidates: set[str], unreadable: set[str], witnessed: set[str]
+    ) -> None:
         required = {"status", "resolved_order_ids", "rejected_candidates", "confidence"}
         if set(resolution) != required or resolution["status"] not in {
             "resolved",
@@ -307,24 +334,24 @@ class Orchestrator:
             raise ValueError("Invalid entity resolution response")
         selected = set(resolution["resolved_order_ids"])
         rejected = set(resolution["rejected_candidates"])
-        if not (selected | rejected) <= set(candidates) or selected & rejected:
+        if not (selected | rejected) <= candidates or selected & rejected:
             raise ValueError("Model resolution escaped candidate scope")
-        if (selected | rejected) & set(unreadable):
+        if (selected | rejected) & unreadable:
             raise ValueError("Unreadable candidate cannot be resolved or rejected without evidence")
         if resolution["status"] == "resolved" and not selected:
             raise ValueError("Resolved entity response is empty")
-        witnessed = set().union(*(values_for_key(e["data"], "order_id") for e in orders.values()))
         if not selected <= witnessed:
             raise ValueError("Resolved candidate has no matching received order evidence")
-        book.handoff("entity-agent", "coordinator", list(book.ledger), "ENTITY_RESOLVED")
-        return resolution, set(candidates)
 
     @staticmethod
     def _check_missing_financial_evidence(output: dict, failures: list[dict]) -> None:
         """Missing financial sources cannot silently become a zero refund history."""
         orders = set(output["entity_resolution"]["resolved_order_ids"])
-        failed_tools = {failure["tool_name"] for failure in failures
-                        if failure["arguments"].get("order_id") in orders}
+        failed_tools = {
+            failure["tool_name"]
+            for failure in failures
+            if failure["arguments"].get("order_id") in orders
+        }
         missing_fields = set()
         if "get_refund_timeline" in failed_tools:
             missing_fields.update({"refunded_total_brl", "refundable_total_brl"})

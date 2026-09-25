@@ -12,7 +12,7 @@ async def main() -> None:
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     settings = ModelSettings.load()
     headers = {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
-    async with httpx2.AsyncClient(timeout=10, headers=headers) as client:
+    async with httpx2.AsyncClient(timeout=settings.timeout, headers=headers) as client:
         response = await client.get(settings.base_url + "/models")
         response.raise_for_status()
         ids = {item["id"] for item in response.json()["data"]}
@@ -29,6 +29,6 @@ async def main() -> None:
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (httpx2.HTTPError, ValueError, KeyError) as error:
+    except (httpx2.HTTPError, RuntimeError, ValueError, KeyError) as error:
         print(f"FAIL: model smoke test ({type(error).__name__}); service not verified")
         raise SystemExit(1) from None

@@ -7,8 +7,10 @@ workstation (local port 18000 to remote 127.0.0.1:8000). Do not open port 8000
 to the public internet. SSH keys and connection details remain in `.local/`.
 
 Copy `kingpro-model.service` and `install_model.sh` to `/opt/kingpro/` on the
-new VM, owned by ubuntu, then run the install script. It installs vLLM 0.30.0
-from PyPI; the actual GPU driver must support the selected CUDA build. Verify
+new VM, owned by ubuntu, then run the install script. It installs vLLM 0.17.1
+with CUDA 12.8 wheels and NVIDIA's CUDA 12.8 forward-compatibility libraries for
+the H200's older driver. vLLM 0.30.0 failed to import on the initial CUDA 12.6
+environment because its binary required libcudart.so.13. Verify
 `/health`, `/v1/models` and a JSON-only inference before running the competition.
 Installation scripts are not evidence that deployment succeeded.
 

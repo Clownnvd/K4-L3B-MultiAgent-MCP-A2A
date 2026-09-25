@@ -1,6 +1,6 @@
 # Implementation status
 
-## Current: offline integration complete; live deployment not ready
+## Current: model running; live workflow under repair
 
 As of 2026-09-25, the real orchestrator completes 100 synthetic demo cases with
 zero failures. These outputs cannot be packaged or submitted as live evidence.
@@ -10,7 +10,8 @@ receipt; synthetic correctness does not establish live semantic accuracy.
 
 Qwen3.5-9B is now approved using its full tensor count (9,653,104,368), with a
 JSON-only non-thinking request adapter. The local configuration targets a private
-SSH tunnel. No successful model inference has happened yet.
+SSH tunnel. Identity and JSON inference now pass on the H200. Live batch execution
+runs beside the model on the GPU VM to avoid intermittent workstation SSH-tunnel resets.
 
 The team credential is valid. Nine MCP tools returned actual evidence during
 inspection; get_refund_timeline returned a server tool-execution error. Typed
@@ -18,13 +19,19 @@ tool failures are recorded separately from evidence and cannot become invented
 empty results or zero-refund history. Missing financial evidence forces a
 conservative investigation result or abort.
 
-A single FPT H100 VM was provisioned. At the latest inspection, the VM was
-RUNNING but its security group remained PROCESSING; SSH timed out and the model
-smoke test failed to connect. Deployment files are prepared, not yet executed
-on that VM. The owner requested keeping the VM running between trials.
+A first FPT H100 VM could not be reached and was deleted at the owner's request.
+The owner provisioned an H200 in Tokyo; SSH and console logins both succeeded.
+All four model weight shards downloaded, and vLLM 0.17.1 with CUDA 12.8 compatibility
+libraries serves the verified Qwen checkpoint. Deployment scripts now record the
+runtime fix and service PATH needed for first-request kernel compilation.
+The owner requested keeping this replacement VM running between trials.
 
-Remaining: resolve VM network provisioning, install/start and identify the model,
-pass the JSON smoke test, pass a small live run, investigate failures, complete
+The first 3-case live test completed 0 and failed 3: the model rejected an unreadable
+candidate without evidence. A bounded entity-repair turn has been added without
+weakening that invariant. A deterministic regression test first reproduced the
+failure and then passed after the repair implementation.
+
+Remaining: pass a small live run, investigate failures, complete
 100 live cases, validate ZIP, commit/push and then submit. Submission is now
 explicitly authorized only after these checks. No score or live completion is claimed.
 
