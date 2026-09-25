@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 
 from .abstention import build_abstention
 from .arithmetic import numeric
+from .decision_support import derive_decision_support
 from .facts import source_fact_state
 from .verifier import verify_output
 
@@ -159,7 +160,7 @@ def prepare_plan_context(payload: dict) -> dict:
         for ref, entry in sorted(ledger.items())
         if entry["domain"] == "policy" and isinstance(entry["data"], dict)
     ]
-    return {
+    result = {
         "case": deepcopy(case),
         "entity_resolution": deepcopy(resolution),
         "order_versions": versions,
@@ -191,9 +192,16 @@ def prepare_plan_context(payload: dict) -> dict:
             "Pending/failed refund requests are not completed refunds. No source precedence is "
             "assumed. Customer claim topics are allegations, not answer labels. "
             "Use case opening time and transaction version when assessing event relevance. "
+            "decision_support summarizes code-checked candidates and compatible version/event "
+            "indices. Use direct current-period refund states and reconciled payment methods "
+            "instead of abstaining solely because an unrelated old/future version exists. "
+            "A split-payment subset with other captures still requires reviewing that conflict. "
+            "These signals are evidence summaries, not claim labels or guaranteed answers. "
             "Choose insufficient_evidence and unknown when interpretation is unresolved."
         ),
     }
+    result["decision_support"] = derive_decision_support(result, ledger)
+    return result
 
 
 def plan_schema(payload: dict) -> dict:
