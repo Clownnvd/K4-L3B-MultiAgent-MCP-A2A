@@ -38,6 +38,25 @@ def test_policy_repair_receives_previous_candidate_and_validation_feedback(tmp_p
     assert output["financial_resolution"]["recommended_refund_brl"] == 100
 
 
+def test_explicit_abstention_is_verified_and_finalized_after_critic_failure(tmp_path):
+    class RejectCritic:
+        async def complete(self, task, payload):
+            return {"approved": False}
+
+    contracts = Contracts(ROOT / "contracts/schemas")
+    case = demo_cases(1)[0]
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts)
+    solver = Orchestrator(contracts, DemoModel(), critic=RejectCritic(), allow_abstention=True)
+    output = asyncio.run(solver.solve(case, DemoGateway([case]), trace))
+    assert output["assessment"]["primary_issue"] == "insufficient_evidence"
+    assert output["assessment"]["confidence"] == 0
+    assert output["financial_resolution"]["recommended_refund_brl"] == 0
+    events = [json.loads(line) for line in trace.path.read_text().splitlines()]
+    assert sum(e["event_type"] == "policy_decided" for e in events) == 1
+    assert any(e.get("decision_code") == "AGENT_ABSTAINED" for e in events)
+    assert events[-1]["event_type"] == "case_finalized"
+
+
 def run_one(tmp_path, *, model=None, critic=None):
     contracts = Contracts(ROOT / "contracts/schemas")
     case = demo_cases(1)[0]
@@ -54,12 +73,20 @@ def test_end_to_end_real_orchestrator_with_synthetic_evidence(tmp_path):
     assert all(call[1]["case_id"] == "DEMO_CASE_001" for call in gateway.calls)
     events = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
     actors = {e["actor"] for e in events}
-    assert {"entity-agent", "order-product-agent", "payment-agent", "shipment-agent",
-            "policy-agent", "conflict-resolver", "verifier"} <= actors
+    assert {
+        "entity-agent",
+        "order-product-agent",
+        "payment-agent",
+        "shipment-agent",
+        "policy-agent",
+        "conflict-resolver",
+        "verifier",
+    } <= actors
     assert events[0]["event_type"] == "case_received"
     assert events[-1]["event_type"] == "case_finalized"
-    consumed = {r for e in events if e["event_type"] == "tool_result_consumed"
-                for r in e["evidence_refs"]}
+    consumed = {
+        r for e in events if e["event_type"] == "tool_result_consumed" for r in e["evidence_refs"]
+    }
     assert set(output["evidence_refs"]) <= consumed
 
 
@@ -70,6 +97,7 @@ def test_model_cannot_resolve_a_fabricated_order(tmp_path):
             if task == "resolve_entity":
                 result["resolved_order_ids"] = ["invented-order"]
             return result
+
     with pytest.raises(ValueError, match="candidate"):
         run_one(tmp_path, model=BadModel())
 
@@ -78,19 +106,31 @@ def test_critic_rejection_is_not_overwritten(tmp_path):
     class Critic:
         async def complete(self, task, payload):
             return {"approved": False, "issues": ["evidence incomplete"]}
+
     with pytest.raises(ValueError, match="critic"):
         run_one(tmp_path, critic=Critic())
 
 
 def test_money_must_be_computed_from_evidence():
     ledger = {"ev_demo_abcdefghijklmnopqrst": {"data": {"paid": "10.10", "returned": 2}}}
-    output = {"financial_resolution": {"recommended_refund_brl": 8.1, "refund_lines": []},
-              "payment_analysis": {"captured_total_brl": None, "refunded_total_brl": None,
-                                   "refundable_total_brl": None}}
-    calculations = [{"target": "/financial_resolution/recommended_refund_brl",
-                     "operation": "subtract", "operands": [
-                         {"evidence_ref": next(iter(ledger)), "pointer": "/paid"},
-                         {"evidence_ref": next(iter(ledger)), "pointer": "/returned"}]}]
+    output = {
+        "financial_resolution": {"recommended_refund_brl": 8.1, "refund_lines": []},
+        "payment_analysis": {
+            "captured_total_brl": None,
+            "refunded_total_brl": None,
+            "refundable_total_brl": None,
+        },
+    }
+    calculations = [
+        {
+            "target": "/financial_resolution/recommended_refund_brl",
+            "operation": "subtract",
+            "operands": [
+                {"evidence_ref": next(iter(ledger)), "pointer": "/paid"},
+                {"evidence_ref": next(iter(ledger)), "pointer": "/returned"},
+            ],
+        }
+    ]
     verify_calculations(output, calculations, ledger)
     output["financial_resolution"]["recommended_refund_brl"] = 9
     with pytest.raises(ValueError, match="arithmetic"):
@@ -111,8 +151,11 @@ def test_hundred_case_demo_is_complete_but_cannot_be_submitted(tmp_path):
     contracts = Contracts(ROOT / "contracts/schemas")
     gateway = DemoGateway(cases)
     solver = Orchestrator(contracts, DemoModel())
-    receipt = asyncio.run(execute_batch(cases, gateway, solver, tmp_path, mode="demo",
-                                       concurrency=4, case_set_version="demo-v1"))
+    receipt = asyncio.run(
+        execute_batch(
+            cases, gateway, solver, tmp_path, mode="demo", concurrency=4, case_set_version="demo-v1"
+        )
+    )
     assert receipt["completed"] == 100
     assert receipt["failed"] == 0
     assert len(list((tmp_path / "outputs").glob("*.json"))) == 100

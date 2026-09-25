@@ -89,7 +89,7 @@ async def execute_batch(
         "schema_version": "student-agent-run-v1", "run_id": uuid.uuid4().hex,
         "mode": mode, "case_set_version": case_set_version, "case_ids": ids,
         "started_at": datetime.now(UTC).isoformat(), "state": "running",
-        "completed": 0, "failed": 0, "cases": {},
+        "completed": 0, "failed": 0, "abstained": 0, "cases": {},
         "source": source_metadata(solver.contracts.root.parent.parent),
         "model": _model_metadata(solver, mode),
     }
@@ -106,14 +106,23 @@ async def execute_batch(
             write_json(input_path, case)
             trace = TraceWriter(trace_path, solver.contracts)
             trace_path.touch(exist_ok=False)
-            record: dict[str, Any] = {"state": "failed", "input_sha256": sha256(input_path)}
+            record: dict[str, Any] = {
+                "state": "failed", "input_sha256": sha256(input_path), "abstained": False,
+            }
             try:
                 output = await solver.solve(case, gateway, trace, evidence_path=evidence_path)
                 solver.contracts.validate_output(output, case_id)
                 ledger = json.loads(evidence_path.read_text(encoding="utf-8"))
                 verify_output(case_id, output, ledger)
+                events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8")
+                          .splitlines() if line.strip()]
+                abstained = any(event.get("case_id") == case_id
+                                and event.get("event_type") == "handoff"
+                                and event.get("decision_code") == "AGENT_ABSTAINED"
+                                for event in events)
                 write_json(output_path, output)
-                record.update(state="completed", output_sha256=sha256(output_path))
+                record.update(state="completed", output_sha256=sha256(output_path),
+                              abstained=abstained)
             except Exception as error:
                 # Transport/model exceptions can contain credentials or customer data.
                 record["error_type"] = type(error).__name__
@@ -124,6 +133,7 @@ async def execute_batch(
                 receipt["cases"][case_id] = record
                 key = "completed" if record["state"] == "completed" else "failed"
                 receipt[key] += 1
+                receipt["abstained"] += int(record["state"] == "completed" and record["abstained"])
                 write_json(run_dir / "receipt.json", receipt)
 
     await asyncio.gather(*(execute(case) for case in cases))

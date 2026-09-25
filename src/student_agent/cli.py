@@ -39,13 +39,15 @@ def _run_directory(root: Path, out: str | None, mode: str) -> Path:
 
 def _print_receipt(run_dir: Path, receipt: dict) -> None:
     print(json.dumps({"run_dir": str(run_dir), "mode": receipt["mode"],
-                      "completed": receipt["completed"], "failed": receipt["failed"]}))
+                      "completed": receipt["completed"], "failed": receipt["failed"],
+                      "abstained": receipt.get("abstained", 0)}))
     if receipt["failed"]:
         raise RuntimeError("Batch contains failed cases; inspect its receipt and checkpoints")
 
 
 async def _run(root: Path, *, out: str | None = None, limit: int | None = None,
-               concurrency: int = 4, critic: bool = False) -> None:
+               concurrency: int = 4, critic: bool = False,
+               abstain_on_failure: bool = False) -> None:
     settings = Settings.load(root)
     model = OpenAICompatibleModel(ModelSettings.load())
     critic_model = OpenAICompatibleModel(ModelSettings.load("CRITIC")) if critic else None
@@ -55,7 +57,8 @@ async def _run(root: Path, *, out: str | None = None, limit: int | None = None,
         raise ValueError("--limit must be between 1 and 100")
     cases = [case_set.cases[case_id] for case_id in case_set.case_ids[:limit]]
     run_dir = _run_directory(root, out, "live")
-    solver = Orchestrator(contracts, model, critic=critic_model)
+    solver = Orchestrator(contracts, model, critic=critic_model,
+                          allow_abstention=abstain_on_failure)
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         gateway.available_tools = set(await gateway.list_tools())
         if not gateway.available_tools:
@@ -90,6 +93,8 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--out", help="new isolated run directory (default: runs/live-<unique>)")
     live.add_argument("--concurrency", type=int, default=4)
     live.add_argument("--critic", action="store_true", help="enable configured CRITIC model")
+    live.add_argument("--abstain-on-failure", action="store_true",
+                      help="allow explicitly traced, verified unknown results when solving fails")
     demo = commands.add_parser("demo", help="run synthetic cases offline; not submittable")
     demo.add_argument("--count", type=int, default=100)
     demo.add_argument("--out", help="new isolated run directory (default: runs/demo-<unique>)")
@@ -116,7 +121,8 @@ def main() -> None:
             asyncio.run(_show_tools(root))
         elif args.command in {"run", "live"}:
             asyncio.run(_run(root, out=args.out, limit=args.limit,
-                             concurrency=args.concurrency, critic=args.critic))
+                             concurrency=args.concurrency, critic=args.critic,
+                             abstain_on_failure=args.abstain_on_failure))
         elif args.command == "demo":
             asyncio.run(_demo(root, out=args.out, count=args.count, concurrency=args.concurrency))
         elif args.command == "validate":

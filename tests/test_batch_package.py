@@ -230,3 +230,29 @@ def test_receipt_reproducibility_uses_explicit_safe_model_fields(tmp_path, monke
     assert "private-auth" not in serialized
     demo = asyncio.run(execute_batch([case], object(), solver, tmp_path / "demo", mode="demo"))
     assert demo["model"] == {"mode": "deterministic_fixture"}
+
+
+def test_batch_counts_only_completed_explicit_abstentions(tmp_path):
+    class AbstainingSolver(FixtureSolver):
+        async def solve(self, case, gateway, trace, evidence_path=None):
+            if case["case_id"] != "CASE_NORMAL":
+                trace.emit(case_id=case["case_id"], event_type="handoff", actor="coordinator",
+                           target="verifier", decision_code="AGENT_ABSTAINED")
+            return await super().solve(case, gateway, trace, evidence_path=evidence_path)
+
+    solver = AbstainingSolver(Contracts(ROOT / "contracts/schemas"), fail="CASE_FAILED")
+    cases = [{"case_id": case_id} for case_id in ["CASE_NORMAL", "CASE_ABSTAIN", "CASE_FAILED"]]
+    receipt = asyncio.run(execute_batch(cases, object(), solver, tmp_path / "run"))
+    assert receipt["completed"] == 2 and receipt["failed"] == 1 and receipt["abstained"] == 1
+    assert receipt["cases"]["CASE_ABSTAIN"]["abstained"] is True
+    assert receipt["cases"]["CASE_NORMAL"]["abstained"] is False
+    assert receipt["cases"]["CASE_FAILED"]["abstained"] is False
+
+
+def test_abstention_cli_flag_is_explicit_and_summary_reports_count(capsys):
+    from student_agent.cli import _print_receipt, parser
+
+    assert parser().parse_args(["run"]).abstain_on_failure is False
+    assert parser().parse_args(["run", "--abstain-on-failure"]).abstain_on_failure is True
+    _print_receipt(Path("run"), {"mode": "live", "completed": 100, "failed": 0, "abstained": 3})
+    assert json.loads(capsys.readouterr().out)["abstained"] == 3

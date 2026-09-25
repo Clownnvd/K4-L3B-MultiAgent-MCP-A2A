@@ -6,6 +6,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from .abstention import build_abstention
 from .arithmetic import verify_calculations
 from .contracts import Contracts
 from .evidence import CaseEvidence
@@ -32,11 +33,13 @@ class Orchestrator:
         model: DecisionModel,
         critic: DecisionModel | None = None,
         repair_attempts: int = 1,
+        allow_abstention: bool = False,
     ):
         self.contracts = contracts
         self.model = model
         self.critic = critic
         self.repair_attempts = min(max(repair_attempts, 0), 1)
+        self.allow_abstention = allow_abstention
         schema_root = contracts.root
         self.schemas = {
             p.name: json.loads(p.read_text(encoding="utf-8"))
@@ -65,6 +68,7 @@ class Orchestrator:
         }
         if not required <= set(available):
             raise ValueError("Required MCP tools absent from discovery")
+        resolution = None
         try:
             resolution, candidate_ids = await self._entity(case, book)
             order_ids = resolution["resolved_order_ids"]
@@ -84,7 +88,11 @@ class Orchestrator:
                     order_ids,
                     ["get_payment_timeline", "get_refund_timeline"],
                 ),
+                return_exceptions=True,
             )
+            for message in messages:
+                if isinstance(message, BaseException):
+                    raise message
             trace.emit(
                 case_id=case_id,
                 event_type="task_assigned",
@@ -205,13 +213,6 @@ class Orchestrator:
             book.handoff(
                 "conflict-resolver", "verifier", output["evidence_refs"], "CONFLICTS_EXAMINED"
             )
-            trace.emit(
-                case_id=case_id,
-                event_type="policy_decided",
-                actor="policy-agent",
-                decision_code=output["assessment"]["primary_issue"].upper(),
-                evidence_refs=output["evidence_refs"],
-            )
             if self.critic:
                 trace.emit(
                     case_id=case_id,
@@ -234,6 +235,13 @@ class Orchestrator:
                 book.handoff("critic-agent", "verifier", output["evidence_refs"], "CRITIC_APPROVED")
             trace.emit(
                 case_id=case_id,
+                event_type="policy_decided",
+                actor="policy-agent",
+                decision_code=output["assessment"]["primary_issue"].upper(),
+                evidence_refs=output["evidence_refs"],
+            )
+            trace.emit(
+                case_id=case_id,
                 event_type="verification_completed",
                 actor="verifier",
                 evidence_refs=output["evidence_refs"],
@@ -241,6 +249,48 @@ class Orchestrator:
                     "schema": True,
                     "scope": True,
                     "arithmetic": True,
+                    "tool_calls": book.calls,
+                },
+            )
+            trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            return output
+        except (ValueError, RuntimeError, TimeoutError, KeyError, TypeError) as error:
+            if not self.allow_abstention or not book.ledger:
+                raise
+            output = build_abstention(case, book.ledger, resolution)
+            self.contracts.validate_output(output, case_id)
+            verify_output(case_id, output, book.ledger)
+            verify_calculations(output, [], book.ledger)
+            self._check_claims(case, output)
+            trace.emit(
+                case_id=case_id, event_type="task_assigned", actor="coordinator", target="verifier"
+            )
+            trace.emit(
+                case_id=case_id,
+                event_type="handoff",
+                actor="coordinator",
+                target="verifier",
+                decision_code="AGENT_ABSTAINED",
+                evidence_refs=output["evidence_refs"],
+                attributes={"error_type": type(error).__name__, "abstained": True},
+            )
+            trace.emit(
+                case_id=case_id,
+                event_type="policy_decided",
+                actor="coordinator",
+                decision_code="INSUFFICIENT_EVIDENCE",
+                evidence_refs=output["evidence_refs"],
+            )
+            trace.emit(
+                case_id=case_id,
+                event_type="verification_completed",
+                actor="verifier",
+                evidence_refs=output["evidence_refs"],
+                attributes={
+                    "schema": True,
+                    "scope": True,
+                    "arithmetic": True,
+                    "abstained": True,
                     "tool_calls": book.calls,
                 },
             )
