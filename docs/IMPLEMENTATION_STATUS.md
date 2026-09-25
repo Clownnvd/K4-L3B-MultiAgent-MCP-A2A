@@ -1,6 +1,34 @@
 # Implementation status
 
-## Completed
+## Current: offline integration complete; live deployment not ready
+
+As of 2026-09-25, the real orchestrator completes 100 synthetic demo cases with
+zero failures. These outputs cannot be packaged or submitted as live evidence.
+Batch execution, isolated checkpoints, guarded packaging and CLI integration
+are implemented. Full regression and lint results are recorded in the version
+receipt; synthetic correctness does not establish live semantic accuracy.
+
+Qwen3.5-9B is now approved using its full tensor count (9,653,104,368), with a
+JSON-only non-thinking request adapter. The local configuration targets a private
+SSH tunnel. No successful model inference has happened yet.
+
+The team credential is valid. Nine MCP tools returned actual evidence during
+inspection; get_refund_timeline returned a server tool-execution error. Typed
+tool failures are recorded separately from evidence and cannot become invented
+empty results or zero-refund history. Missing financial evidence forces a
+conservative investigation result or abort.
+
+A single FPT H100 VM was provisioned. At the latest inspection, the VM was
+RUNNING but its security group remained PROCESSING; SSH timed out and the model
+smoke test failed to connect. Deployment files are prepared, not yet executed
+on that VM. The owner requested keeping the VM running between trials.
+
+Remaining: resolve VM network provisioning, install/start and identify the model,
+pass the JSON smoke test, pass a small live run, investigate failures, complete
+100 live cases, validate ZIP, commit/push and then submit. Submission is now
+explicitly authorized only after these checks. No score or live completion is claimed.
+
+## Foundational work
 
 - Official L3B input release downloaded; CLI confirmed exactly 100 inputs.
 - Isolated Python environment installed with the starter dependencies.
@@ -10,7 +38,7 @@
 - Model policy rejects unknown model sizes and models over 10 billion total parameters.
 - R2AI transfer mapping documented in `R2AI_TRANSFER.md`.
 
-## Development snapshot: v0.1.0-scaffold (2026-09-25)
+## Historical snapshot: v0.1.0-scaffold (2026-09-25)
 
 This is a work-in-progress source checkpoint, NOT a competition-ready release.
 

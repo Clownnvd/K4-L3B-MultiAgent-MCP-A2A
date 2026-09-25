@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .evidence import CaseEvidence
+from .mcp_gateway import MCPToolError
 
 
 @dataclass(frozen=True)
@@ -27,15 +28,22 @@ async def investigate(
     book.trace.emit(case_id=book.case_id, event_type="task_assigned", actor="coordinator",
                     target=actor, attributes={"tools": ",".join(tools)})
     facts, refs = {}, []
+    failed = False
     for order in order_ids:
         facts[order] = {}
         for tool in tools:
-            result = await book.fetch(actor, tool, order_id=order)
+            try:
+                result = await book.fetch(actor, tool, order_id=order)
+            except MCPToolError:
+                facts[order][tool] = {"status": "tool_execution_failed", "data": None}
+                failed = True
+                continue
             facts[order][tool] = result["data"]
             refs.append(result["evidence_ref"])
     message = AgentMessage("msg_" + secrets.token_hex(8), book.case_id, actor,
                            "coordinator", tuple(refs), facts)
-    book.handoff(actor, "coordinator", refs, "SPECIALIST_EVIDENCE_READY")
+    book.handoff(actor, "coordinator", refs,
+                 "SPECIALIST_EVIDENCE_INCOMPLETE" if failed else "SPECIALIST_EVIDENCE_READY")
     return message
 
 

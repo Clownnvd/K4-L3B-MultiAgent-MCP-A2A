@@ -12,6 +12,18 @@ from mcp.client.streamable_http import streamable_http_client
 from .contracts import Contracts
 
 
+class MCPToolError(RuntimeError):
+    """The server returned a tool execution error, not an evidence object.
+
+    This deliberately excludes transport failures and invalid evidence contracts.
+    Consumers may mark this source unavailable without inventing evidence.
+    """
+
+    def __init__(self, tool_name: str, message: str) -> None:
+        self.tool_name = tool_name
+        super().__init__(f"MCP tool {tool_name} failed: {message or 'unknown error'}")
+
+
 class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
@@ -28,7 +40,7 @@ class EvidenceGateway:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
-            raise RuntimeError(f"MCP tool {tool_name} failed: {message or 'unknown error'}")
+            raise MCPToolError(tool_name, message)
         evidence = getattr(result, "structuredContent", None)
         if evidence is None:
             evidence = getattr(result, "structured_content", None)

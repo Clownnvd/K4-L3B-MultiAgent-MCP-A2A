@@ -12,7 +12,7 @@
 
 Không dùng model có **tổng số tham số lớn hơn 10 tỷ** trong bài thi. Lượng tử hóa không làm giảm số tham số. Qwen3.5-9B là ứng viên đã chọn để thử; chưa kết nối dịch vụ chạy mô hình.
 
-`MODEL_MAX_TOTAL_PARAMETERS` trong `.env` ghi lại ràng buộc này. Mã kiểm tra ở `model_policy.py` và danh sách cho phép ở `model_adapter.py` hiện mới nhận Qwen3-8B; cần bổ sung và kiểm tra trước khi chạy Qwen3.5-9B.
+`MODEL_MAX_TOTAL_PARAMETERS` trong `.env` ghi lại ràng buộc này. Mã kiểm tra ở `model_policy.py` và danh sách cho phép ở `model_adapter.py` nhận Qwen3-8B và Qwen3.5-9B với số tham số đã xác minh. Mô hình thật vẫn cần kiểm tra kết nối trước khi xử lý bài thi.
 
 ## Khóa truy cập
 
@@ -20,4 +20,4 @@ Team API Key chỉ lưu trong `.env` cục bộ; `.gitignore` đã chặn file n
 
 ## Trạng thái
 
-Đây là bản khung đang phát triển, tách biệt với bài cũ trong `K4-Day9-Multi-Agent-A2A`. Đã viết `solve_case` nhưng chưa kiểm tra được toàn luồng. Workspace đã mở bằng key hợp lệ; chưa có kết quả xử lý hay bài nộp. Trạng thái chi tiết ở `docs/IMPLEMENTATION_STATUS.md`.
+Đây là bản đang phát triển, tách biệt với bài cũ trong `K4-Day9-Multi-Agent-A2A`. Đã kiểm tra toàn luồng trên 100 tình huống giả lập. Workspace đã mở bằng key hợp lệ; chưa có kết quả từ mô hình thật hay bài nộp. Trạng thái chi tiết ở `docs/IMPLEMENTATION_STATUS.md`.

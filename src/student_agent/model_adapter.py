@@ -1,4 +1,5 @@
 """Swappable JSON-only model boundary. No model is enabled by default."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,8 +13,12 @@ import httpx2
 from .model_policy import require_allowed_model
 
 # Exact checkpoints, not marketing size suffixes or active MoE parameters.
-# Source: https://huggingface.co/Qwen/Qwen3-8B (8.2B total parameters).
-APPROVED_CHECKPOINTS = {"Qwen/Qwen3-8B": 8_200_000_000}
+# Source: Hugging Face /api/models/<checkpoint> safetensors.total, 2026-09-25.
+# Qwen3.5 count includes all tensors, not only its text backbone.
+APPROVED_CHECKPOINTS = {
+    "Qwen/Qwen3-8B": 8_190_735_360,
+    "Qwen/Qwen3.5-9B": 9_653_104_368,
+}
 
 
 class DecisionModel(Protocol):
@@ -40,8 +45,12 @@ class ModelSettings:
         url = os.getenv(f"{prefix}_BASE_URL", "").strip().rstrip("/")
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"{prefix}_BASE_URL must point to an OpenAI-compatible endpoint")
-        return cls(checkpoint, os.getenv(f"{prefix}_SERVED_NAME", checkpoint), url,
-                   os.getenv(f"{prefix}_API_KEY", ""))
+        return cls(
+            checkpoint,
+            os.getenv(f"{prefix}_SERVED_NAME", checkpoint),
+            url,
+            os.getenv(f"{prefix}_API_KEY", ""),
+        )
 
 
 SYSTEM = """You are a bounded specialist in an evidence-first e-commerce investigation.
@@ -67,19 +76,30 @@ class OpenAICompatibleModel:
         content = json.dumps({"task": task, "payload": payload}, ensure_ascii=False)
         if len(content.encode()) > 180_000:
             raise ValueError("Model context budget exceeded; evidence was not truncated")
-        body = {"model": self.settings.served_name, "temperature": 0,
-                "max_tokens": self.settings.max_tokens,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": SYSTEM},
-                             {"role": "user", "content": content}]}
-        headers = {"Authorization": f"Bearer {self.settings.api_key}"} if self.settings.api_key else {}
+        body = {
+            "model": self.settings.served_name,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "max_tokens": self.settings.max_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": content},
+            ],
+        }
+        headers = (
+            {"Authorization": f"Bearer {self.settings.api_key}"} if self.settings.api_key else {}
+        )
         own_client = self.client is None
         client = self.client or httpx2.AsyncClient(timeout=self.settings.timeout)
         try:
             self.calls += 1
             response = await asyncio.wait_for(
-                client.post(self.settings.base_url + "/chat/completions", json=body,
-                            headers=headers), timeout=self.settings.timeout,
+                client.post(
+                    self.settings.base_url + "/chat/completions", json=body, headers=headers
+                ),
+                timeout=self.settings.timeout,
             )
             if response.status_code != 200:
                 raise RuntimeError(f"Model endpoint returned HTTP {response.status_code}")

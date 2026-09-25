@@ -1,5 +1,9 @@
 # K4 L3B — Multi-Agent MCP + A2A
 
+> Bản KINGPRO đang phát triển: đã kiểm tra toàn luồng bằng 100 tình huống giả lập,
+> chưa có kết quả thi thật. Dùng [hướng dẫn chạy hiện tại](docs/RUNBOOK.md) và xem
+> [trạng thái triển khai](docs/IMPLEMENTATION_STATUS.md). Nội dung đề gốc được giữ bên dưới.
+
 ## Mục tiêu
 
 Xây dựng hệ thống multi-agent điều tra khiếu nại thương mại điện tử.

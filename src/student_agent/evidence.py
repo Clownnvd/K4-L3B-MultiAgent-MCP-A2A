@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx2
 
+from .mcp_gateway import MCPToolError
+
 PERMISSIONS = {
     "entity-agent": {"get_order", "get_customer_history"},
     "order-product-agent": {"get_order_items", "get_product_context", "get_sellers"},
@@ -24,6 +26,7 @@ class CaseEvidence:
         self.trace = trace
         self.timeout = timeout
         self.ledger: dict[str, dict[str, Any]] = {}
+        self.failures: list[dict[str, Any]] = []
         self.cache: dict[str, dict[str, Any]] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.calls = 0
@@ -45,6 +48,18 @@ class CaseEvidence:
                         timeout=self.timeout,
                     )
                     break
+                except MCPToolError:
+                    # Error metadata is not evidence and carries no evidence reference.
+                    self.failures.append({
+                        "actor": actor, "tool_name": tool, "arguments": dict(arguments),
+                        "status": "tool_execution_failed",
+                    })
+                    self.trace.emit(
+                        case_id=self.case_id, event_type="handoff", actor=actor,
+                        target="coordinator", decision_code="MCP_TOOL_EXECUTION_FAILURE",
+                        tool_name=tool, attributes={"error_type": "MCPToolError", **arguments},
+                    )
+                    raise
                 except (TimeoutError, OSError, httpx2.TransportError) as error:
                     self.trace.emit(
                         case_id=self.case_id, event_type="handoff", actor=actor,

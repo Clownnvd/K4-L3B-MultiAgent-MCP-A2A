@@ -29,6 +29,7 @@ dist/*
 *.zip
 *.log
 .local/
+runs/
 
 # Editors and operating systems
 .idea/
