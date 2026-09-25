@@ -25,11 +25,11 @@ def test_policy_repair_receives_previous_candidate_and_validation_feedback(tmp_p
             if task == "decide_policy":
                 self.policy_calls += 1
                 if self.policy_calls == 1:
-                    result["output"]["financial_resolution"]["recommended_refund_brl"] = 101
+                    result["output"]["assessment"]["case_status"] = "no_action"
                 else:
                     assert payload["validation_feedback"]
-                    prior = payload["previous_response"]["output"]["financial_resolution"]
-                    assert prior["recommended_refund_brl"] == 101
+                    prior = payload["previous_response"]["output"]["assessment"]
+                    assert prior["case_status"] == "no_action"
             return result
 
     model = RepairModel()

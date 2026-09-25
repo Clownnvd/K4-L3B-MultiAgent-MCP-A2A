@@ -7,11 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from .abstention import build_abstention
-from .arithmetic import verify_calculations
+from .arithmetic import materialize_calculations, verify_calculations
 from .contracts import Contracts
+from .entity import resolve_from_sources
 from .evidence import CaseEvidence
+from .facts import source_fact_state
 from .mcp_gateway import EvidenceGateway, MCPToolError
 from .model_adapter import DecisionModel, ModelSettings, OpenAICompatibleModel
+from .output_builder import build_grounded_output
 from .specialists import investigate, values_for_key
 from .trace import TraceWriter
 from .verifier import verify_output
@@ -119,6 +122,7 @@ class Orchestrator:
                 "entity_resolution": resolution,
                 "specialists": [message.payload() for message in messages],
                 "evidence": book.ledger,
+                "source_facts": source_fact_state(case, book.ledger),
                 "tool_failures": book.failures,
                 "output_schemas": self.schemas,
                 "required_response": {
@@ -137,6 +141,13 @@ class Orchestrator:
                     ],
                 },
                 "rules": (
+                    "source_facts contains mechanically checked, record-local date comparisons "
+                    "and witnessed entity IDs. Use them instead of mental date arithmetic. "
+                    "Its candidate interpretations are hypotheses, not authoritative rules. "
+                    "Do not join different dated versions solely because their order ID matches. "
+                    "Select numeric operands from numeric_source_catalog; Python will calculate "
+                    "the final amounts. These source selections must still be relevant to the "
+                    "resolved transaction version and must not double-count payment records. "
                     "Return exactly two top-level keys: output and calculations. "
                     "Place the official case object INSIDE output, never at the top level. "
                     "A tool_execution_failed event is a technical retrieval failure, NOT "
@@ -175,6 +186,18 @@ class Orchestrator:
                 try:
                     output = proposal["output"]
                     calculations = proposal["calculations"]
+                    used_refs = {
+                        operand["evidence_ref"]
+                        for calculation in calculations
+                        for operand in calculation["operands"]
+                    }
+                    if not used_refs <= set(book.ledger):
+                        raise ValueError("Arithmetic references evidence absent from this case")
+                    output["evidence_refs"] = list(
+                        dict.fromkeys([*output["evidence_refs"], *sorted(used_refs)])
+                    )
+                    output = materialize_calculations(output, calculations, book.ledger)
+                    output = build_grounded_output(output, case, book.ledger)
                     self.contracts.validate_output(output, case_id)
                     if output["entity_resolution"] != resolution:
                         raise ValueError("Policy model changed entity resolution")
@@ -345,6 +368,16 @@ class Orchestrator:
                 await book.fetch(
                     "entity-agent", "get_customer_history", customer_unique_id=customer_id
                 )
+        if getattr(getattr(self.model, "settings", None), "decision_mode", "output") == "plan":
+            grounded = resolve_from_sources(case, orders, book.ledger)
+            if grounded is not None:
+                book.handoff(
+                    "entity-agent",
+                    "coordinator",
+                    list(book.ledger),
+                    "ENTITY_RESOLVED_FROM_CUSTOMER_LINK",
+                )
+                return grounded, set(candidates)
         payload = {
             "case": case,
             "candidates": orders,

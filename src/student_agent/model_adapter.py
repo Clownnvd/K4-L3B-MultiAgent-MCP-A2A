@@ -36,6 +36,7 @@ class ModelSettings:
     api_key: str
     timeout: float = 90
     max_tokens: int = 6000
+    decision_mode: str = "output"
 
     @classmethod
     def load(cls, prefix: str = "MODEL") -> ModelSettings:
@@ -48,11 +49,15 @@ class ModelSettings:
         url = os.getenv(f"{prefix}_BASE_URL", "").strip().rstrip("/")
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"{prefix}_BASE_URL must point to an OpenAI-compatible endpoint")
+        decision_mode = os.getenv(f"{prefix}_DECISION_MODE", "output")
+        if decision_mode not in {"output", "plan"}:
+            raise ValueError("Model decision mode must be output or plan")
         return cls(
             checkpoint,
             os.getenv(f"{prefix}_SERVED_NAME", checkpoint),
             url,
             os.getenv(f"{prefix}_API_KEY", ""),
+            decision_mode=decision_mode,
         )
 
 
@@ -66,8 +71,9 @@ the provided source-bound calculation format; never write executable code.
 """
 
 
-def _inline_schema(value: Any, documents: dict, document: str,
-                   resolving: tuple[str, ...] = ()) -> Any:
+def _inline_schema(
+    value: Any, documents: dict, document: str, resolving: tuple[str, ...] = ()
+) -> Any:
     """Resolve only supplied, local contract references; never fetch a schema URL."""
     if isinstance(value, list):
         return [_inline_schema(item, documents, document, resolving) for item in value]
@@ -87,8 +93,11 @@ def _inline_schema(value: Any, documents: dict, document: str,
         expanded = _inline_schema(target, documents, target_document, (*resolving, reference))
         siblings = {key: item for key, item in value.items() if key != "$ref"}
         return {**expanded, **_inline_schema(siblings, documents, document, resolving)}
-    return {key: _inline_schema(item, documents, document, resolving)
-            for key, item in value.items() if key not in {"$id", "$schema", "$defs", "title"}}
+    return {
+        key: _inline_schema(item, documents, document, resolving)
+        for key, item in value.items()
+        if key not in {"$id", "$schema", "$defs", "title"}
+    }
 
 
 def numeric_source_catalog(ledger: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -108,8 +117,7 @@ def numeric_source_catalog(ledger: dict[str, dict[str, Any]]) -> list[dict[str, 
                 numeric(value)
             except ValueError:
                 return
-            rows.append({"evidence_ref": ref, "pointer": pointer,
-                         "value": value, "domain": domain})
+            rows.append({"evidence_ref": ref, "pointer": pointer, "value": value, "domain": domain})
 
     for ref, envelope in ledger.items():
         visit(envelope["data"], "", ref, envelope["domain"])
@@ -124,15 +132,23 @@ def build_response_schema(payload: dict[str, Any], task: str) -> dict[str, Any] 
             allowed = list(payload.get("candidates", {}))
         unreadable = set(payload.get("unreadable_candidates", []))
         allowed = sorted({value for value in allowed if value not in unreadable})
-        id_set = {"type": "array", "uniqueItems": True, "maxItems": min(20, len(allowed)),
-                  "items": {"type": "string", **({"enum": allowed} if allowed else {})}}
-        return {"type": "object", "additionalProperties": False,
-                "required": ["status", "resolved_order_ids", "rejected_candidates", "confidence"],
-                "properties": {
-                    "status": {"type": "string", "enum": ["resolved", "ambiguous", "not_found"]},
-                    "resolved_order_ids": id_set, "rejected_candidates": id_set,
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                }}
+        id_set = {
+            "type": "array",
+            "uniqueItems": True,
+            "maxItems": min(20, len(allowed)),
+            "items": {"type": "string", **({"enum": allowed} if allowed else {})},
+        }
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["status", "resolved_order_ids", "rejected_candidates", "confidence"],
+            "properties": {
+                "status": {"type": "string", "enum": ["resolved", "ambiguous", "not_found"]},
+                "resolved_order_ids": id_set,
+                "rejected_candidates": id_set,
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+        }
     if task != "decide_policy":
         return None
     documents = payload.get("output_schemas", {})
@@ -140,12 +156,22 @@ def build_response_schema(payload: dict[str, Any], task: str) -> dict[str, Any] 
     if official is None:
         raise ValueError("Policy decision requires the supplied official output schemas")
     output = _inline_schema(official, documents, "l3b-output-v2.schema.json")
+    for field, allowed_ids in payload.get("source_facts", {}).get("allowed_entity_ids", {}).items():
+        field_schema = output["properties"]["affected_entities"]["properties"].get(field)
+        if field_schema is not None:
+            if allowed_ids:
+                field_schema["items"]["enum"] = sorted(set(allowed_ids))
+            else:
+                field_schema["maxItems"] = 0
     resolution = payload.get("entity_resolution")
     if resolution is not None:
         output["properties"]["entity_resolution"]["const"] = deepcopy(resolution)
         resolved = set(resolution["resolved_order_ids"])
-        failed_tools = {failure["tool_name"] for failure in payload.get("tool_failures", [])
-                        if failure["arguments"].get("order_id") in resolved}
+        failed_tools = {
+            failure["tool_name"]
+            for failure in payload.get("tool_failures", [])
+            if failure["arguments"].get("order_id") in resolved
+        }
         missing_fields = set()
         if "get_refund_timeline" in failed_tools:
             missing_fields.update({"refunded_total_brl", "refundable_total_brl"})
@@ -160,44 +186,64 @@ def build_response_schema(payload: dict[str, Any], task: str) -> dict[str, Any] 
             finance["recommended_refund_brl"]["const"] = 0
             finance["refund_lines"]["maxItems"] = 0
             properties["assessment"]["properties"]["case_status"]["const"] = "needs_investigation"
-    operand = {"type": "object", "additionalProperties": False,
-               "required": ["evidence_ref", "pointer"], "properties": {
-                   "evidence_ref": {"type": "string"}, "pointer": {"type": "string"}}}
+    operand = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["evidence_ref", "pointer"],
+        "properties": {"evidence_ref": {"type": "string"}, "pointer": {"type": "string"}},
+    }
     numeric_paths: dict[str, list[str]] = {}
     for row in numeric_source_catalog(payload.get("evidence", {})):
         numeric_paths.setdefault(row["evidence_ref"], []).append(row["pointer"])
     if numeric_paths:
         operand["anyOf"] = [
-            {"type": "object", "required": ["evidence_ref", "pointer"], "properties": {
-                "evidence_ref": {"type": "string", "const": ref},
-                "pointer": {"type": "string", "enum": pointers},
-            }} for ref, pointers in numeric_paths.items()
+            {
+                "type": "object",
+                "required": ["evidence_ref", "pointer"],
+                "properties": {
+                    "evidence_ref": {"type": "string", "const": ref},
+                    "pointer": {"type": "string", "enum": pointers},
+                },
+            }
+            for ref, pointers in numeric_paths.items()
         ]
     operands = {"type": "array", "items": operand, "uniqueItems": True}
     if not numeric_paths:
         operands["maxItems"] = 0
-    targets = ["/financial_resolution/recommended_refund_brl",
-               "/payment_analysis/captured_total_brl", "/payment_analysis/refunded_total_brl",
-               "/payment_analysis/refundable_total_brl"]
+    targets = [
+        "/financial_resolution/recommended_refund_brl",
+        "/payment_analysis/captured_total_brl",
+        "/payment_analysis/refunded_total_brl",
+        "/payment_analysis/refundable_total_brl",
+    ]
     targets.extend(f"/financial_resolution/refund_lines/{index}/amount_brl" for index in range(10))
-    calculation = {"type": "object", "additionalProperties": False,
-                   "required": ["target", "operation", "operands"], "properties": {
-                       "target": {"type": "string", "enum": targets},
-                       "operation": {"type": "string", "enum": [
-                           "sum", "subtract", "remaining", "minimum", "zero"]
-                           if numeric_paths else ["zero"]},
-                       "operands": operands,
-                   }}
-    return {"type": "object", "additionalProperties": False,
-            "required": ["output", "calculations"], "properties": {
-                "output": output, "calculations": {"type": "array", "items": calculation}}}
+    calculation = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["target", "operation", "operands"],
+        "properties": {
+            "target": {"type": "string", "enum": targets},
+            "operation": {
+                "type": "string",
+                "enum": ["sum", "subtract", "remaining", "minimum", "zero"]
+                if numeric_paths
+                else ["zero"],
+            },
+            "operands": operands,
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["output", "calculations"],
+        "properties": {"output": output, "calculations": {"type": "array", "items": calculation}},
+    }
 
 
 def generation_schema(value: Any) -> Any:
     """XGrammar 0.17 rejects uniqueItems; keep it in post-generation validation."""
     if isinstance(value, dict):
-        return {key: generation_schema(item) for key, item in value.items()
-                if key != "uniqueItems"}
+        return {key: generation_schema(item) for key, item in value.items() if key != "uniqueItems"}
     if isinstance(value, list):
         return [generation_schema(item) for item in value]
     return value
@@ -213,7 +259,21 @@ class OpenAICompatibleModel:
         require_allowed_model(
             self.settings.checkpoint, APPROVED_CHECKPOINTS.get(self.settings.checkpoint)
         )
-        if task == "decide_policy":
+        plan_mode = task == "decide_policy" and self.settings.decision_mode == "plan"
+        original_payload = payload
+        if plan_mode:
+            from .decision_plan import plan_schema, prepare_plan_context
+
+            payload = prepare_plan_context(original_payload)
+            if "validation_feedback" in original_payload:
+                payload["validation_feedback"] = original_payload["validation_feedback"]
+                payload["previous_plan"] = original_payload.get("previous_response", {}).get(
+                    "decision_plan"
+                )
+            response_schema = plan_schema(original_payload)
+        else:
+            response_schema = build_response_schema(payload, task)
+        if task == "decide_policy" and not plan_mode:
             payload = {
                 **payload,
                 "numeric_source_catalog": numeric_source_catalog(payload.get("evidence", {})),
@@ -229,18 +289,26 @@ class OpenAICompatibleModel:
         content = json.dumps({"task": task, "payload": payload}, ensure_ascii=False)
         if len(content.encode()) > 180_000:
             raise ValueError("Model context budget exceeded; evidence was not truncated")
-        response_schema = build_response_schema(payload, task)
-        response_format = {"type": "json_object"} if response_schema is None else {
-            "type": "json_schema",
-            "json_schema": {"name": task, "strict": True,
-                            "schema": generation_schema(response_schema)},
-        }
+        response_format = (
+            {"type": "json_object"}
+            if response_schema is None
+            else {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": task,
+                    "strict": True,
+                    "schema": generation_schema(response_schema),
+                },
+            }
+        )
         body = {
             "model": self.settings.served_name,
             "temperature": 0.7,
             "top_p": 0.8,
             "chat_template_kwargs": {"enable_thinking": False},
-            "max_tokens": self.settings.max_tokens,
+            "max_tokens": min(self.settings.max_tokens, 2048)
+            if plan_mode
+            else self.settings.max_tokens,
             "response_format": response_format,
             "messages": [
                 {"role": "system", "content": SYSTEM},
@@ -274,6 +342,12 @@ class OpenAICompatibleModel:
                 if error is not None:
                     location = "/".join(str(part) for part in error.absolute_path) or "$"
                     raise ValueError(f"Model response violates task JSON schema at {location}")
+            if plan_mode:
+                from .decision_plan import compile_plan
+
+                result = compile_plan(parsed, original_payload)
+                result["decision_plan"] = parsed
+                return result
             return parsed
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError("Malformed model response envelope") from exc

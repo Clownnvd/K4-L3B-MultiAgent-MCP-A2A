@@ -58,6 +58,7 @@ def _model_metadata(solver: Any, mode: str) -> dict[str, Any]:
     return {
         "checkpoint": settings.checkpoint, "served_name": settings.served_name,
         "max_tokens": settings.max_tokens, "temperature": 0.7, "mode": "nonthinking",
+        "decision_mode": getattr(settings, "decision_mode", "output"),
     }
 
 

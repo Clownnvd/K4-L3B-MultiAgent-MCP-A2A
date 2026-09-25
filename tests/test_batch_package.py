@@ -224,6 +224,7 @@ def test_receipt_reproducibility_uses_explicit_safe_model_fields(tmp_path, monke
     assert receipt["model"] == {
         "checkpoint": "Qwen/Qwen3-8B", "served_name": "local-qwen", "max_tokens": 1234,
         "temperature": 0.7, "mode": "nonthinking",
+        "decision_mode": "output",
     }
     serialized = (tmp_path / "live/receipt.json").read_text()
     assert "fake-api-key-never-serialize" not in serialized
