@@ -8,6 +8,7 @@ tiers (0.35/0.65/0.85) are explicit reporting heuristics, not calibrated likelih
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from jsonschema import Draft202012Validator
@@ -39,6 +40,20 @@ def _escape(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
+def _after(left: object, right: object) -> bool | None:
+    """Compare aware timestamps only; absent timezone/date remains unknown."""
+    if not isinstance(left, str) or not isinstance(right, str):
+        return None
+    try:
+        first = datetime.fromisoformat(left.replace("Z", "+00:00"))
+        second = datetime.fromisoformat(right.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if first.tzinfo is None or second.tzinfo is None:
+        return None
+    return first > second
+
+
 def _events(ledger: dict, domain: str, order_ids: set[str]) -> list[dict]:
     rows = []
     for ref, envelope in sorted(ledger.items()):
@@ -65,10 +80,39 @@ def prepare_plan_context(payload: dict) -> dict:
     resolution = payload["entity_resolution"]
     orders = set(resolution["resolved_order_ids"])
     facts = source_fact_state(case, ledger)
+    opened_at = case.get("opened_at")
+    excluded = {
+        "order_versions": [],
+        "capture_choices": [],
+        "refund_choices": [],
+        "payment_events": [],
+        "refund_events": [],
+        "shipment_events": [],
+    }
     versions = []
+    version_count = 0
     for row in sorted(facts["order_observations"], key=lambda r: (r["evidence_ref"], r["pointer"])):
         if row["order_id"] in orders and row["fields"].get("purchase_timestamp"):
-            versions.append({"id": f"version_{len(versions) + 1:04d}", **row})
+            version_count += 1
+            purchases = row["fields"]["purchase_timestamp"]
+            after_opened = _after(purchases[0]["value"], opened_at) if len(purchases) == 1 else None
+            version = {
+                "id": f"version_{version_count:04d}",
+                **row,
+                "after_case_opened": after_opened,
+            }
+            (excluded["order_versions"] if after_opened is True else versions).append(version)
+
+    scoped_events = {}
+    for domain in ("payment", "refund", "shipment"):
+        scoped_events[domain] = []
+        for event in _events(ledger, domain, orders):
+            event["after_case_opened"] = _after(event.get("event_at"), opened_at)
+            (
+                excluded[domain + "_events"]
+                if event["after_case_opened"] is True
+                else scoped_events[domain]
+            ).append(event)
 
     def atoms(domain: str, event_types: set[str], prefix: str) -> list[dict]:
         choices = []
@@ -93,7 +137,22 @@ def prepare_plan_context(payload: dict) -> dict:
                     "event_type": event["event_type"],
                 }
             )
-        return choices
+        for choice in choices:
+            choice["after_case_opened"] = _after(choice["event_at"], opened_at)
+        name = "capture_choices" if domain == "payment" else "refund_choices"
+        excluded[name] = [row for row in choices if row["after_case_opened"] is True]
+        return [row for row in choices if row["after_case_opened"] is not True]
+
+    payment_records = []
+    for ref, envelope in sorted(ledger.items()):
+        data = envelope["data"]
+        if envelope["domain"] != "payment" or not isinstance(data, dict):
+            continue
+        for index, record in enumerate(data.get("payments", [])):
+            if isinstance(record, dict) and record.get("order_id", data.get("order_id")) in orders:
+                payment_records.append(
+                    {**deepcopy(record), "evidence_ref": ref, "pointer": f"/payments/{index}"}
+                )
 
     policies = [
         {"evidence_ref": ref, "rules": deepcopy(entry["data"].get("rules", {}))}
@@ -111,9 +170,11 @@ def prepare_plan_context(payload: dict) -> dict:
             "refund", {"refund_completed", "refunded", "refund_settled"}, "refund"
         ),
         "policy_sources": policies,
-        "payment_events": _events(ledger, "payment", orders),
-        "refund_events": _events(ledger, "refund", orders),
-        "shipment_events": _events(ledger, "shipment", orders),
+        "payment_events": scoped_events["payment"],
+        "refund_events": scoped_events["refund"],
+        "shipment_events": scoped_events["shipment"],
+        "payment_records": payment_records,
+        "excluded_future": excluded,
         "source_facts": facts,
         "claim_ids": [
             claim["claim_id"] for claim in case.get("customer_request", {}).get("claims", [])
@@ -122,6 +183,9 @@ def prepare_plan_context(payload: dict) -> dict:
         "confidence_tiers": dict(TIERS),
         "instructions": (
             "Choose only listed indices; no literal amounts, entities, evidence refs or actions. "
+            "Explicit accounting assumption: balances and event verdicts are as of case.opened_at. "
+            "Known future purchases/events are excluded from choices, retained in excluded_future "
+            "and raw source facts for review. Missing dates/timezones are unknown. "
             "Select the relevant dated order version and payment/refund events without mixing "
             "different purchase episodes. Future records stay visible, not automatically valid. "
             "Pending/failed refund requests are not completed refunds. No source precedence is "
@@ -201,6 +265,12 @@ def compile_plan(plan: dict, payload: dict) -> dict:
     selected = {row["id"]: row for row in context["order_versions"]}.get(plan["order_version_id"])
     captures = [row for row in context["capture_choices"] if row["id"] in plan["capture_ids"]]
     refunds = [row for row in context["refund_choices"] if row["id"] in plan["refund_ids"]]
+    if selected:
+        purchases = selected["fields"].get("purchase_timestamp", [])
+        if len(purchases) == 1:
+            for event in [*captures, *refunds]:
+                if _after(purchases[0]["value"], event.get("event_at")) is True:
+                    raise ValueError("Decision plan event occurs before selected purchase")
     orders = set(resolution["resolved_order_ids"])
     failures = {
         failure["tool_name"]
@@ -282,10 +352,10 @@ def compile_plan(plan: dict, payload: dict) -> dict:
         issue = "insufficient_evidence"
     if issue in {"refund_pending", "refund_failed"}:
         status = "pending" if issue == "refund_pending" else "failed"
-        if not any(event.get("status") == status for event in _events(ledger, "refund", orders)):
+        if not any(event.get("status") == status for event in context["refund_events"]):
             issue = "insufficient_evidence"
     if issue == "payment_mismatch" and not any(
-        "mismatch" in event.get("event_type", "") for event in _events(ledger, "payment", orders)
+        "mismatch" in event.get("event_type", "") for event in context["payment_events"]
     ):
         issue = "insufficient_evidence"
     if resolution["status"] != "resolved":
@@ -393,9 +463,7 @@ def compile_plan(plan: dict, payload: dict) -> dict:
     if isinstance(parties, list) and len(parties) <= 5:
         output["root_cause_analysis"]["responsible_parties"] = deepcopy(parties)
     if issue != "insufficient_evidence":
-        output["root_cause_analysis"]["ranked_causes"] = [
-            {"cause_code": issue.upper(), "rank": 1}
-        ]
+        output["root_cause_analysis"]["ranked_causes"] = [{"cause_code": issue.upper(), "rank": 1}]
     for claim in output["claim_assessments"]:
         verdict = plan["claim_verdicts"][claim["claim_id"]]
         if issue == "insufficient_evidence":

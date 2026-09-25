@@ -28,6 +28,12 @@ class DecisionModel(Protocol):
     async def complete(self, task: str, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
+class DecisionPlanError(ValueError):
+    def __init__(self, message: str, decision_plan: dict):
+        super().__init__(message)
+        self.decision_plan = decision_plan
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     checkpoint: str
@@ -345,7 +351,10 @@ class OpenAICompatibleModel:
             if plan_mode:
                 from .decision_plan import compile_plan
 
-                result = compile_plan(parsed, original_payload)
+                try:
+                    result = compile_plan(parsed, original_payload)
+                except ValueError as error:
+                    raise DecisionPlanError(str(error), parsed) from error
                 result["decision_plan"] = parsed
                 return result
             return parsed
