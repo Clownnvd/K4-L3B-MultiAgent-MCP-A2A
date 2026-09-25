@@ -200,6 +200,7 @@ class Orchestrator:
                     if attempt == self.repair_attempts:
                         raise
                     payload["validation_feedback"] = str(error)[:800]
+                    payload["previous_response"] = proposal
             assert output is not None
             book.handoff(
                 "conflict-resolver", "verifier", output["evidence_refs"], "CONFLICTS_EXAMINED"

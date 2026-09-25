@@ -16,6 +16,28 @@ from student_agent.workflow import Orchestrator
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_policy_repair_receives_previous_candidate_and_validation_feedback(tmp_path):
+    class RepairModel(DemoModel):
+        policy_calls = 0
+
+        async def complete(self, task, payload):
+            result = await super().complete(task, payload)
+            if task == "decide_policy":
+                self.policy_calls += 1
+                if self.policy_calls == 1:
+                    result["output"]["financial_resolution"]["recommended_refund_brl"] = 101
+                else:
+                    assert payload["validation_feedback"]
+                    prior = payload["previous_response"]["output"]["financial_resolution"]
+                    assert prior["recommended_refund_brl"] == 101
+            return result
+
+    model = RepairModel()
+    output, _ = run_one(tmp_path, model=model)
+    assert model.policy_calls == 2
+    assert output["financial_resolution"]["recommended_refund_brl"] == 100
+
+
 def run_one(tmp_path, *, model=None, critic=None):
     contracts = Contracts(ROOT / "contracts/schemas")
     case = demo_cases(1)[0]
