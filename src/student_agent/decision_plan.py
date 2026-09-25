@@ -16,6 +16,7 @@ from jsonschema import Draft202012Validator
 from .abstention import build_abstention
 from .arithmetic import numeric
 from .decision_support import derive_decision_support
+from .episode_grounding import bind_parties, in_episode, shipment_support
 from .facts import source_fact_state
 from .verifier import verify_output
 
@@ -109,14 +110,11 @@ def prepare_plan_context(payload: dict) -> dict:
         scoped_events[domain] = []
         for event in _events(ledger, domain, orders):
             event["after_case_opened"] = _after(event.get("event_at"), opened_at)
-            (
-                excluded[domain + "_events"]
-                if event["after_case_opened"] is True
-                else scoped_events[domain]
-            ).append(event)
+            scoped_events[domain].append(event)
 
     def atoms(domain: str, event_types: set[str], prefix: str) -> list[dict]:
         choices = []
+        identities = {}
         for event in _events(ledger, domain, orders):
             if event.get("event_type") not in event_types or event.get("status") not in _SETTLED:
                 continue
@@ -126,6 +124,26 @@ def prepare_plan_context(payload: dict) -> dict:
                 continue
             if amount < 0:
                 continue
+            identity_keys = (
+                ("refund_id", "event_id") if domain == "refund" else ("capture_id", "event_id")
+            )
+            identity = next(
+                (
+                    (key, event[key])
+                    for key in identity_keys
+                    if isinstance(event.get(key), str) and event[key]
+                ),
+                None,
+            )
+            signature = (amount, event.get("event_at"), event["status"], event["event_type"])
+            identity_key = (event["order_id"], identity) if identity else None
+            if identity_key in identities:
+                previous, previous_signature = identities[identity_key]
+                if signature == previous_signature:
+                    # Same explicit transaction/event identity and identical content.
+                    # Amount equality without identity is never enough to merge charges.
+                    continue
+                previous["identity_conflict"] = True
             choices.append(
                 {
                     "id": f"{prefix}_{len(choices) + 1:04d}",
@@ -136,13 +154,14 @@ def prepare_plan_context(payload: dict) -> dict:
                     "event_at": event.get("event_at"),
                     "status": event["status"],
                     "event_type": event["event_type"],
+                    "identity_conflict": bool(identity_key in identities),
                 }
             )
+            if identity_key is not None and identity_key not in identities:
+                identities[identity_key] = (choices[-1], signature)
         for choice in choices:
             choice["after_case_opened"] = _after(choice["event_at"], opened_at)
-        name = "capture_choices" if domain == "payment" else "refund_choices"
-        excluded[name] = [row for row in choices if row["after_case_opened"] is True]
-        return [row for row in choices if row["after_case_opened"] is not True]
+        return choices
 
     payment_records = []
     for ref, envelope in sorted(ledger.items()):
@@ -158,7 +177,12 @@ def prepare_plan_context(payload: dict) -> dict:
     policies = [
         {"evidence_ref": ref, "rules": deepcopy(entry["data"].get("rules", {}))}
         for ref, entry in sorted(ledger.items())
-        if entry["domain"] == "policy" and isinstance(entry["data"], dict)
+        if entry["domain"] == "policy"
+        and isinstance(entry["data"], dict)
+        and (
+            not case.get("policy_version")
+            or entry["data"].get("policy_version") == case["policy_version"]
+        )
     ]
     result = {
         "case": deepcopy(case),
@@ -184,9 +208,13 @@ def prepare_plan_context(payload: dict) -> dict:
         "confidence_tiers": dict(TIERS),
         "instructions": (
             "Choose only listed indices; no literal amounts, entities, evidence refs or actions. "
-            "Explicit accounting assumption: balances and event verdicts are as of case.opened_at. "
-            "Known future purchases/events are excluded from choices, retained in excluded_future "
-            "and raw source facts for review. Missing dates/timezones are unknown. "
+            "Case opening is NOT an accounting cutoff. Later captures/refunds can resolve an "
+            "earlier complaint. Purchases after opening remain excluded from candidate episodes, "
+            "but received events stay available. Bind events to the selected purchase episode "
+            "until the next distinct purchase timestamp of the same order. "
+            "Missing dates/timezones are unknown. episode_support gives handoff comparisons "
+            "with sources; delivery lateness alone does not establish seller blame. "
+            "Include every known completed refund in the selected episode, not a subset. "
             "Select the relevant dated order version and payment/refund events without mixing "
             "different purchase episodes. Future records stay visible, not automatically valid. "
             "Pending/failed refund requests are not completed refunds. No source precedence is "
@@ -201,6 +229,9 @@ def prepare_plan_context(payload: dict) -> dict:
         ),
     }
     result["decision_support"] = derive_decision_support(result, ledger)
+    result["episode_support"] = {
+        version["id"]: shipment_support(version, result, ledger) for version in versions
+    }
     return result
 
 
@@ -273,12 +304,16 @@ def compile_plan(plan: dict, payload: dict) -> dict:
     selected = {row["id"]: row for row in context["order_versions"]}.get(plan["order_version_id"])
     captures = [row for row in context["capture_choices"] if row["id"] in plan["capture_ids"]]
     refunds = [row for row in context["refund_choices"] if row["id"] in plan["refund_ids"]]
+    if any(row.get("identity_conflict") for row in [*captures, *refunds]):
+        raise ValueError("Conflicting financial transaction identity needs investigation")
     if selected:
         purchases = selected["fields"].get("purchase_timestamp", [])
         if len(purchases) == 1:
             for event in [*captures, *refunds]:
                 if _after(purchases[0]["value"], event.get("event_at")) is True:
                     raise ValueError("Decision plan event occurs before selected purchase")
+                if in_episode(event, selected, context) is False:
+                    raise ValueError("Decision plan event belongs to another purchase episode")
     orders = set(resolution["resolved_order_ids"])
     failures = {
         failure["tool_name"]
@@ -295,10 +330,22 @@ def compile_plan(plan: dict, payload: dict) -> dict:
         return bool(orders) and orders <= present
 
     captured = sum((numeric(row["value"]) for row in captures), Decimal(0)) if captures else None
+    episode_refunds = [
+        row
+        for row in context["refund_choices"]
+        if selected is None or in_episode(row, selected, context) is not False
+    ]
+    certain_refunds = {
+        row["id"]
+        for row in episode_refunds
+        if selected is not None and in_episode(row, selected, context) is True
+    }
+    if certain_refunds - set(plan["refund_ids"]):
+        raise ValueError("Decision plan omits known completed refund in selected episode")
     refund_known = (
         available("refund")
         and "get_refund_timeline" not in failures
-        and (not context["refund_choices"] or bool(refunds))
+        and (not episode_refunds or {r["id"] for r in episode_refunds} <= set(plan["refund_ids"]))
     )
     refunded = sum((numeric(row["value"]) for row in refunds), Decimal(0)) if refund_known else None
     if "get_payment_timeline" in failures or not available("payment"):
@@ -343,6 +390,7 @@ def compile_plan(plan: dict, payload: dict) -> dict:
         )
 
     issue = plan["primary_issue"]
+    support = context["episode_support"].get(plan["order_version_id"], {})
     statuses = (
         {source["value"] for source in selected["fields"].get("order_status", [])}
         if (selected)
@@ -356,17 +404,27 @@ def compile_plan(plan: dict, payload: dict) -> dict:
         selected is None or selected["delivery_comparison"]["verdict"] != "late"
     ):
         issue = "insufficient_evidence"
+    if issue == "late_delivery_seller" and support.get("handoff_verdict") != "seller_delay":
+        issue = "insufficient_evidence"
     if issue in {"valid_split_payment", "duplicate_charge"} and len(captures) < 2:
         issue = "insufficient_evidence"
     if issue in {"refund_pending", "refund_failed"}:
         status = "pending" if issue == "refund_pending" else "failed"
-        if not any(event.get("status") == status for event in context["refund_events"]):
+        if not any(
+            event.get("status") == status
+            and str(event.get("event_type", "")).startswith("refund")
+            and selected is not None
+            and in_episode(event, selected, context) is not False
+            for event in context["refund_events"]
+        ):
             issue = "insufficient_evidence"
     if issue == "payment_mismatch" and not any(
-        "mismatch" in event.get("event_type", "") for event in context["payment_events"]
+        "mismatch" in event.get("event_type", "")
+        for event in context["payment_events"]
+        if selected is not None and in_episode(event, selected, context) is not False
     ):
         issue = "insufficient_evidence"
-    if resolution["status"] != "resolved":
+    if resolution["status"] != "resolved" or selected is None:
         issue = "insufficient_evidence"
 
     policy = context["policy_sources"][0] if len(context["policy_sources"]) == 1 else None
@@ -431,6 +489,8 @@ def compile_plan(plan: dict, payload: dict) -> dict:
         output["shipment_analysis"].update(
             {"verdict": shipment, "timeline_complete": comparison["verdict"] != "unknown"}
         )
+        if shipment == "seller_delay":
+            output["shipment_analysis"]["late_seller_ids"] = support.get("late_seller_ids", [])
     if captured is not None and refunded is not None:
         payment_verdict = {
             "duplicate_charge": "duplicate_capture",
@@ -469,7 +529,7 @@ def compile_plan(plan: dict, payload: dict) -> dict:
         output["resolution_actions"] = [action]
     parties = rule.get("responsible_parties", [])
     if isinstance(parties, list) and len(parties) <= 5:
-        output["root_cause_analysis"]["responsible_parties"] = deepcopy(parties)
+        output["root_cause_analysis"]["responsible_parties"] = bind_parties(parties, issue, support)
     if issue != "insufficient_evidence":
         output["root_cause_analysis"]["ranked_causes"] = [{"cause_code": issue.upper(), "rank": 1}]
     for claim in output["claim_assessments"]:

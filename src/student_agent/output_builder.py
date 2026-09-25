@@ -1,4 +1,5 @@
 """Narrow mechanical grounding; never infer a new business decision or refund amount."""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -19,8 +20,15 @@ ENTITY_KEYS = {
     "shipment_ids": {"shipment_id", "shipment_ids"},
 }
 MONEY_ACTIONS = {"issue_refund", "refund_freight", "refund_duplicate_charge", "retry_refund"}
-LATE_EVENTS = {"delivered_late", "seller_delay", "logistics_delay", "late_delivery_seller",
-               "late_delivery_logistics", "carrier_delay", "shipping_delay"}
+LATE_EVENTS = {
+    "delivered_late",
+    "seller_delay",
+    "logistics_delay",
+    "late_delivery_seller",
+    "late_delivery_logistics",
+    "carrier_delay",
+    "shipping_delay",
+}
 
 
 def _records(value: Any, order_id: str | None = None) -> Iterator[tuple[dict, str | None]]:
@@ -60,7 +68,17 @@ def _shipment_check(output: dict, scoped: list[tuple[str, dict]]) -> None:
     verdict = output.get("shipment_analysis", {}).get("verdict")
     if verdict not in {"logistics_delay", "seller_delay"}:
         return
-    if any(record.get("event_type") in LATE_EVENTS for _, record in scoped):
+    events = (
+        {"seller_delay", "late_delivery_seller"}
+        if verdict == "seller_delay"
+        else LATE_EVENTS - {"seller_delay", "late_delivery_seller"}
+    )
+    if any(
+        record.get("event_type") in events
+        and record.get("actor")
+        not in ({"logistics_provider", "carrier"} if verdict == "seller_delay" else {"seller"})
+        for _, record in scoped
+    ):
         return
     comparisons = []
     incomplete = False
@@ -68,30 +86,44 @@ def _shipment_check(output: dict, scoped: list[tuple[str, dict]]) -> None:
         if domain not in {"order", "customer", "shipment", "item"}:
             continue
         if verdict == "logistics_delay":
-            relevant = {"delivered_customer_at", "order_delivered_customer_date",
-                        "estimated_delivery_at", "order_estimated_delivery_date"}
+            relevant = {
+                "delivered_customer_at",
+                "order_delivered_customer_date",
+                "estimated_delivery_at",
+                "order_estimated_delivery_date",
+            }
             if not relevant.intersection(record):
                 continue
-            pairs = [(_first(record, "delivered_customer_at", "order_delivered_customer_date"),
-                      _first(record, "estimated_delivery_at", "order_estimated_delivery_date"))]
+            pairs = [
+                (
+                    _first(record, "delivered_customer_at", "order_delivered_customer_date"),
+                    _first(record, "estimated_delivery_at", "order_estimated_delivery_date"),
+                )
+            ]
         else:
             limits = record.get("shipping_limits")
             if isinstance(limits, list) and limits:
-                dates = [_first(item, "shipping_limit_at", "shipping_limit_date")
-                         if isinstance(item, dict) else None for item in limits]
+                dates = [
+                    _first(item, "shipping_limit_at", "shipping_limit_date")
+                    if isinstance(item, dict)
+                    else None
+                    for item in limits
+                ]
             elif "shipping_limit_at" in record or "shipping_limit_date" in record:
                 dates = [_first(record, "shipping_limit_at", "shipping_limit_date")]
             else:
-                if any(key in record for key in (
-                    "delivered_carrier_at", "order_delivered_carrier_date"
-                )):
+                if any(
+                    key in record
+                    for key in ("delivered_carrier_at", "order_delivered_carrier_date")
+                ):
                     incomplete = True
                 continue
             carrier = _first(record, "delivered_carrier_at", "order_delivered_carrier_date")
             # An item-only deadline is not an independently complete shipment version.
-            if carrier is None and not any(k in record for k in (
-                "delivered_carrier_at", "order_delivered_carrier_date", "shipping_limits"
-            )):
+            if carrier is None and not any(
+                k in record
+                for k in ("delivered_carrier_at", "order_delivered_carrier_date", "shipping_limits")
+            ):
                 continue
             pairs = [(carrier, date) for date in dates]
         for actual, promised in pairs:
@@ -108,11 +140,15 @@ def _refund_check(output: dict, scoped: list[tuple[str, dict]]) -> None:
     if output.get("payment_analysis", {}).get("verdict") != "refund_failed":
         return
     witnessed = any(
-        domain == "refund" and (
+        domain == "refund"
+        and (
             record.get("event_type") == "refund_failed"
-            or (str(record.get("event_type", "")).startswith("refund")
-                and record.get("status") == "failed")
-        ) for domain, record in scoped
+            or (
+                str(record.get("event_type", "")).startswith("refund")
+                and record.get("status") == "failed"
+            )
+        )
+        for domain, record in scoped
     )
     if not witnessed:
         raise GroundingError("REFUND_FAILURE_UNWITNESSED")
@@ -161,18 +197,28 @@ def build_grounded_output(output: dict, case: dict, ledger: dict) -> dict:
     if result.get("case_id") != case.get("case_id"):
         raise GroundingError("CASE_SCOPE_MISMATCH")
     resolved = set(result.get("entity_resolution", {}).get("resolved_order_ids", []))
-    scoped = [(envelope.get("domain", ""), record)
-              for envelope in ledger.values() if envelope.get("domain") != "policy"
-              for record, order_id in _records(envelope.get("data")) if order_id in resolved]
+    scoped = [
+        (envelope.get("domain", ""), record)
+        for envelope in ledger.values()
+        if envelope.get("domain") != "policy"
+        for record, order_id in _records(envelope.get("data"))
+        if order_id in resolved
+    ]
     entities = result.setdefault("affected_entities", {})
     for field, keys in ENTITY_KEYS.items():
-        witnessed = set().union(*(_values(record.get(key))
-                                  for _, record in scoped for key in keys))
+        witnessed = set().union(*(_values(record.get(key)) for _, record in scoped for key in keys))
         if field == "order_ids":
             witnessed &= resolved
-        entities[field] = list(dict.fromkeys(
-            item for item in entities.get(field, []) if item in witnessed
-        ))
+        entities[field] = list(
+            dict.fromkeys(item for item in entities.get(field, []) if item in witnessed)
+        )
+    # Generic policy roles do not authorize a concrete identity from another order.
+    witnessed_sellers = set().union(
+        *(_values(record.get(key)) for _, record in scoped for key in ENTITY_KEYS["seller_ids"])
+    )
+    for party in result.get("root_cause_analysis", {}).get("responsible_parties", []):
+        if party.get("party_type") == "seller" and party.get("party_id") not in witnessed_sellers:
+            party["party_id"] = None
     _shipment_check(result, scoped)
     _refund_check(result, scoped)
     _policy_actions(result, case, ledger)

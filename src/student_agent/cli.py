@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .batch import execute_batch
+from .batch import execute_batch, validate_resume
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
@@ -47,7 +47,9 @@ def _print_receipt(run_dir: Path, receipt: dict) -> None:
 
 async def _run(root: Path, *, out: str | None = None, limit: int | None = None,
                concurrency: int = 4, critic: bool = False,
-               abstain_on_failure: bool = False) -> None:
+               abstain_on_failure: bool = False, resume_failed: bool = False) -> None:
+    if resume_failed and not out:
+        raise ValueError("--resume-failed requires --out pointing to the original run directory")
     settings = Settings.load(root)
     model = OpenAICompatibleModel(ModelSettings.load())
     critic_model = OpenAICompatibleModel(ModelSettings.load("CRITIC")) if critic else None
@@ -59,12 +61,15 @@ async def _run(root: Path, *, out: str | None = None, limit: int | None = None,
     run_dir = _run_directory(root, out, "live")
     solver = Orchestrator(contracts, model, critic=critic_model,
                           allow_abstention=abstain_on_failure)
+    if resume_failed:
+        validate_resume(cases, solver, run_dir, mode="live", case_set_version=case_set.version)
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         gateway.available_tools = set(await gateway.list_tools())
         if not gateway.available_tools:
             raise RuntimeError("MCP Gateway returned no tools")
         receipt = await execute_batch(cases, gateway, solver, run_dir, mode="live",
-                                      concurrency=concurrency, case_set_version=case_set.version)
+                                      concurrency=concurrency, case_set_version=case_set.version,
+                                      resume_failed=resume_failed)
     _print_receipt(run_dir, receipt)
 
 
@@ -93,6 +98,8 @@ def parser() -> argparse.ArgumentParser:
     live.add_argument("--out", help="new isolated run directory (default: runs/live-<unique>)")
     live.add_argument("--concurrency", type=int, default=4)
     live.add_argument("--critic", action="store_true", help="enable configured CRITIC model")
+    live.add_argument("--resume-failed", action="store_true",
+                      help="retry only failed cases in --out; requires identical clean source")
     live.add_argument("--abstain-on-failure", action="store_true",
                       help="allow explicitly traced, verified unknown results when solving fails")
     demo = commands.add_parser("demo", help="run synthetic cases offline; not submittable")
@@ -122,7 +129,8 @@ def main() -> None:
         elif args.command in {"run", "live"}:
             asyncio.run(_run(root, out=args.out, limit=args.limit,
                              concurrency=args.concurrency, critic=args.critic,
-                             abstain_on_failure=args.abstain_on_failure))
+                             abstain_on_failure=args.abstain_on_failure,
+                             resume_failed=args.resume_failed))
         elif args.command == "demo":
             asyncio.run(_demo(root, out=args.out, count=args.count, concurrency=args.concurrency))
         elif args.command == "validate":

@@ -28,6 +28,7 @@ class CaseEvidence:
         self.ledger: dict[str, dict[str, Any]] = {}
         self.failures: list[dict[str, Any]] = []
         self.cache: dict[str, dict[str, Any]] = {}
+        self.failed_calls: dict[str, MCPToolError] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.calls = 0
 
@@ -40,6 +41,10 @@ class CaseEvidence:
         async with self.locks.setdefault(key, asyncio.Lock()):
             if key in self.cache:
                 return deepcopy(self.cache[key])
+            if key in self.failed_calls:
+                # Server execution failures are unavailable evidence for this
+                # case. Repeated consumers must not restart the same failed call.
+                raise self.failed_calls[key].with_traceback(None)
             for attempt in range(2):
                 self.calls += 1
                 try:
@@ -48,7 +53,8 @@ class CaseEvidence:
                         timeout=self.timeout,
                     )
                     break
-                except MCPToolError:
+                except MCPToolError as error:
+                    self.failed_calls[key] = error
                     # Error metadata is not evidence and carries no evidence reference.
                     self.failures.append({
                         "actor": actor, "tool_name": tool, "arguments": dict(arguments),

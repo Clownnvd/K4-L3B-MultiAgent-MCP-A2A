@@ -29,12 +29,14 @@ def sample():
         "order_versions": [
             {
                 "id": "v1",
+                "order_id": "order-a",
                 "fields": {
                     "purchase_timestamp": [{"value": "2020-01-01T00:00:00Z"}],
                     "order_status": [{"value": "delivered"}],
                 },
             }
         ],
+        "excluded_future": {"order_versions": []},
         "capture_choices": [
             {"id": "c1", "order_id": "order-a", "event_at": "2020-01-02T00:00:00Z", "value": 60},
             {"id": "c2", "order_id": "order-a", "event_at": "2020-01-02T01:00:00Z", "value": 40},

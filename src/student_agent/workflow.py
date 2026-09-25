@@ -9,7 +9,7 @@ from typing import Any
 from .abstention import build_abstention
 from .arithmetic import materialize_calculations, verify_calculations
 from .contracts import Contracts
-from .entity import resolve_from_sources
+from .entity import resolve_from_sources, unique_history_candidate
 from .evidence import CaseEvidence
 from .facts import source_fact_state
 from .mcp_gateway import EvidenceGateway, MCPToolError
@@ -353,6 +353,29 @@ class Orchestrator:
         )
         orders = {}
         unreadable = []
+        hint = case.get("customer_unique_id_hint")
+        plan_mode = (
+            getattr(getattr(self.model, "settings", None), "decision_mode", "output") == "plan"
+        )
+        if plan_mode and isinstance(hint, str) and hint:
+            # A positive customer link can prioritize one order. It never proves
+            # that skipped candidates are invalid, so none are marked rejected.
+            with suppress(MCPToolError):
+                history = await book.fetch(
+                    "entity-agent", "get_customer_history", customer_unique_id=hint
+                )
+                linked = unique_history_candidate(case, history)
+                if linked is not None:
+                    orders[linked] = await book.fetch("entity-agent", "get_order", order_id=linked)
+                    grounded = resolve_from_sources(case, orders, book.ledger)
+                    if grounded is not None:
+                        book.handoff(
+                            "entity-agent", "coordinator", list(book.ledger),
+                            "ENTITY_RESOLVED_FROM_CUSTOMER_LINK",
+                        )
+                        return grounded, set(candidates)
+        # Unconfirmed or ambiguous history retains the original discovery scope.
+        # CaseEvidence reuses both successful reads and typed execution failures.
         for order in candidates:
             try:
                 orders[order] = await book.fetch("entity-agent", "get_order", order_id=order)
@@ -360,7 +383,6 @@ class Orchestrator:
                 unreadable.append(order)
         if not orders:
             raise ValueError("No readable candidate order evidence; investigation cannot proceed")
-        hint = case.get("customer_unique_id_hint")
         known_customers = set().union(
             *(values_for_key(e["data"], "customer_unique_id") for e in orders.values())
         )
@@ -371,7 +393,7 @@ class Orchestrator:
                 await book.fetch(
                     "entity-agent", "get_customer_history", customer_unique_id=customer_id
                 )
-        if getattr(getattr(self.model, "settings", None), "decision_mode", "output") == "plan":
+        if plan_mode:
             grounded = resolve_from_sources(case, orders, book.ledger)
             if grounded is not None:
                 book.handoff(

@@ -6,6 +6,7 @@ from decimal import Decimal
 from itertools import combinations
 
 from .arithmetic import numeric
+from .episode_grounding import in_episode
 
 
 def _date(value):
@@ -42,10 +43,11 @@ def derive_decision_support(context: dict, ledger: dict) -> dict:
         )
     ]
     result["matching_order_version_ids"] = [row["id"] for row in versions]
+    if not versions:
+        return result
 
     def current(row):
-        at = _date(row.get("event_at"))
-        return row.get("order_id") == orders[0] and at is not None and at >= anchor
+        return in_episode(row, versions[0], context) is True
 
     captures = [row for row in context["capture_choices"] if current(row)]
     result["capture_ids_in_selected_period"] = [row["id"] for row in captures]

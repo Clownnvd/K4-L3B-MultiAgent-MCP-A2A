@@ -4,6 +4,32 @@ from __future__ import annotations
 from typing import Any
 
 
+def unique_history_candidate(case: dict, evidence: dict) -> str | None:
+    """Select one scoped identity to confirm, without disproving other candidates.
+
+    History is received in this case before calling this helper. Duplicate rows for
+    an order are fact versions, not additional identities. Missing/ambiguous history
+    cannot narrow the investigation; ID spelling has no meaning here.
+    """
+    hint = case.get("customer_unique_id_hint")
+    data = evidence.get("data")
+    if (not isinstance(hint, str) or not hint or evidence.get("domain") != "customer"
+            or not isinstance(data, dict) or data.get("customer_unique_id") != hint
+            or data.get("status") == "tool_execution_failed"
+            or not isinstance(data.get("orders"), list)):
+        return None
+    candidates = set(case.get("candidate_order_ids", []))
+    claimed = case.get("customer_request", {}).get("claimed_order_id")
+    if claimed:
+        candidates.add(claimed)
+    linked = {
+        row["order_id"] for row in data["orders"]
+        if isinstance(row, dict) and isinstance(row.get("order_id"), str)
+        and row["order_id"] in candidates
+    }
+    return next(iter(linked)) if len(linked) == 1 else None
+
+
 def resolve_from_sources(case: dict, orders: dict, ledger: dict) -> dict | None:
     """Return a conservative identity resolution, or None for the model fallback.
 
