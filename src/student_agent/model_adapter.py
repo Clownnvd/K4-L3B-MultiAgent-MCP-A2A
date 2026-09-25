@@ -149,6 +149,16 @@ def build_response_schema(payload: dict[str, Any], task: str) -> dict[str, Any] 
                 "output": output, "calculations": {"type": "array", "items": calculation}}}
 
 
+def generation_schema(value: Any) -> Any:
+    """XGrammar 0.17 rejects uniqueItems; keep it in post-generation validation."""
+    if isinstance(value, dict):
+        return {key: generation_schema(item) for key, item in value.items()
+                if key != "uniqueItems"}
+    if isinstance(value, list):
+        return [generation_schema(item) for item in value]
+    return value
+
+
 class OpenAICompatibleModel:
     def __init__(self, settings: ModelSettings, client: httpx2.AsyncClient | None = None):
         self.settings = settings
@@ -165,7 +175,8 @@ class OpenAICompatibleModel:
         response_schema = build_response_schema(payload, task)
         response_format = {"type": "json_object"} if response_schema is None else {
             "type": "json_schema",
-            "json_schema": {"name": task, "strict": True, "schema": response_schema},
+            "json_schema": {"name": task, "strict": True,
+                            "schema": generation_schema(response_schema)},
         }
         body = {
             "model": self.settings.served_name,

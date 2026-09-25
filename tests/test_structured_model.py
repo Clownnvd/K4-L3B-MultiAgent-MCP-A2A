@@ -9,9 +9,20 @@ from student_agent.model_adapter import (
     ModelSettings,
     OpenAICompatibleModel,
     build_response_schema,
+    generation_schema,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_generation_schema_omits_unsupported_unique_items_only():
+    source = {"type": "array", "uniqueItems": True,
+              "items": {"type": "object", "properties": {"xs": {
+                  "type": "array", "uniqueItems": True, "maxItems": 3}}}}
+    generated = generation_schema(source)
+    assert "uniqueItems" not in json.dumps(generated)
+    assert generated["items"]["properties"]["xs"]["maxItems"] == 3
+    assert source["uniqueItems"] is True
 
 
 def schemas():
