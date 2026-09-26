@@ -57,6 +57,24 @@ def test_case_evidence_caches_only_within_case_and_returns_copies():
     asyncio.run(exercise())
 
 
+def test_reused_evidence_ref_cannot_change_contents():
+    """An evidence reference is immutable inside one case-scoped ledger."""
+
+    class ConflictingGateway:
+        async def call(self, tool, **arguments):
+            result = evidence()
+            result["data"]["order_id"] = arguments["order_id"]
+            return result
+
+    async def exercise():
+        scoped = CaseEvidence("CASE_NGAN_AUDIT", ConflictingGateway(), Trace())
+        await scoped.fetch("entity-agent", "get_order", order_id="order-a")
+        with pytest.raises(ValueError, match="changed its contents"):
+            await scoped.fetch("entity-agent", "get_order", order_id="order-b")
+
+    asyncio.run(exercise())
+
+
 def test_agent_cannot_call_outside_permission():
     c = CaseEvidence("CASE_A", SimpleNamespace(), Trace())
     with pytest.raises(ValueError, match="permission"):
