@@ -14,7 +14,7 @@
 | Thành viên | Vai trò tổng quát | Phạm vi | Bằng chứng/trạng thái |
 |---|---|---|---|
 | Nguyễn Văn Duy | Trưởng nhóm; Orchestration & Integration | Orchestrator, model adapter/deployment, live MCP, batch/checkpoint, verifier, packaging và quyết định submission | Các nhánh `work/v0.1.0-scaffold` đến `work/v0.6-grounding-efficiency`; commit mới nhất `28bb92c` |
-| Dương Thị Ngân | Evidence & Rules | Audit source facts, decision plan, grounded output, evidence/provenance rules và test tương ứng | Commit `9cb354c`; nhánh `ngan/evidence-rules`; pull request đang mở vào `work/v0.2-model-ready` |
+| Dương Thị Ngân | Evidence & Rules | Audit source facts, decision plan, grounded output, evidence/provenance rules và test tương ứng | Commit `a05e11a`; pull request đã hợp nhất vào `work/v0.6-grounding-efficiency`; báo cáo tại `docs/NGAN_EVIDENCE_RULES_REPORT.md` |
 
 Phân công trên chỉ mô tả ownership (phạm vi chịu trách nhiệm). Không ghi nhận một thành viên là tác giả của code do người khác viết nếu chưa có commit/PR của chính thành viên đó.
 
